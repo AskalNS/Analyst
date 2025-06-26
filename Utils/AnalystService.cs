@@ -4,16 +4,26 @@ using HtmlAgilityPack;
 using System.Web;
 using System.Linq;
 using System.Web;
+using Microsoft.EntityFrameworkCore;
+using Newtonsoft.Json;
+using System.Text;
+using System;
+using ClientService.EF;
+using ClientService.Models;
 
 namespace Analyst.Utils
 {
-    class Analyst
+    class AnalystService
     {
         private readonly HttpClient _httpClient;
+        private readonly ApplicationDbContext _dbContext;
+        private readonly ILogger<AnalystService> _logger;
 
-        public Analyst(HttpClient httpClient)
+        public AnalystService(HttpClient httpClient, ApplicationDbContext dbContext, ILogger<AnalystService> logger)
         {
             _httpClient = httpClient;
+            _dbContext = dbContext;
+            _logger = logger;
         }
 
         public async Task<int?> ParseMinPriceAsync(string productQuery)
@@ -41,6 +51,51 @@ namespace Analyst.Utils
                 .ToList();
 
             return prices.Any() ? prices.Min() : (int?)null;
+        }
+
+
+
+        public async Task<string?> LoginAsync(string login, string password)
+        {
+            try
+            {
+                var url = "https://halykmarket.kz/gw/merchant-orders/auth";
+
+                var payload = new
+                {
+                    login,
+                    password
+                };
+
+                var content = new StringContent(
+                    JsonConvert.SerializeObject(payload),
+                    Encoding.UTF8,
+                    "application/json"
+                );
+
+                var request = new HttpRequestMessage(HttpMethod.Post, url)
+                {
+                    Content = content
+                };
+                request.Headers.Add("Accept", "application/json");
+
+                var response = await _httpClient.SendAsync(request);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    var json = await response.Content.ReadAsStringAsync();
+                    var data = JsonConvert.DeserializeObject<LoginResponse>(json);
+                    return data?.Token;
+                }
+
+                _logger.LogWarning($"Ошибка входа: статус {(int)response.StatusCode}");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Ошибка при логине: {ex.Message}");
+            }
+
+            return null;
         }
     }
 }

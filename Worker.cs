@@ -15,103 +15,140 @@ namespace Analyst
     public class Worker : BackgroundService
     {
         private readonly ILogger<Worker> _logger;
-        private readonly ApplicationDbContext _context;
-        private readonly EncryptionUtils _encryptionUtils;
-        private readonly AnalystService _analystService;
+        private readonly IServiceScopeFactory _scopeFactory;
+        private readonly HttpClient _httpClient;
 
-        public Worker(ILogger<Worker> logger, ApplicationDbContext context, EncryptionUtils encryptionUtils)
+        public Worker(ILogger<Worker> logger, HttpClient httpClient, IServiceScopeFactory scopeFactory)
         {
             _logger = logger;
-            _context = context;
-            _encryptionUtils = encryptionUtils;
+            _httpClient = httpClient;
+            _scopeFactory = scopeFactory;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             while (!stoppingToken.IsCancellationRequested)
             {
-
-                List<IntegratedUsers> users = _context.IntegratedUsers.ToList();
-
-                foreach (var user in users)
+                try
                 {
-                    user.TimeFlag = DateTime.Now;
-                    user.IsWorking = true;
-                    _context.SaveChanges();
+                    using var scope = _scopeFactory.CreateScope(); // 🔧 создаём временный скоуп
 
-                    HalykCredential credentils = _context.HalykCredentials.Where(x => x.UserId == user.UserId).First();
-                    if (credentils == null)
+                    var _context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+                    var _analystService = scope.ServiceProvider.GetRequiredService<AnalystService>();
+                    var _encryptionUtils = scope.ServiceProvider.GetRequiredService<EncryptionUtils>();
+                    var _halykService = scope.ServiceProvider.GetRequiredService<HalykService>();
+
+
+
+                    List<IntegratedUsers> users = _context.IntegratedUsers.ToList();
+
+                    foreach (var user in users)
                     {
-                        User us = _context.Users.Where(x => x.Id == user.UserId).First();
-                        if (us == null) continue;
+                        user.TimeFlag = DateTime.UtcNow;
+                        user.IsWorking = true;
+                        _context.SaveChanges();
 
-                        _logger.LogError("У пользователя:" + us.PhoneNumber + " нет данных маркета");
-                        continue; //TODO В будущем добавить функцию уведомления в бд
+                        HalykCredential credentils = _context.HalykCredentials.Where(x => x.UserId == user.UserId).First();
+                        if (credentils == null)
+                        {
+                            User us = _context.Users.Where(x => x.Id == user.UserId).First();
+                            if (us == null) continue;
+
+                            _logger.LogError("У пользователя:" + us.PhoneNumber + " нет данных маркета");
+                            continue; //TODO В будущем добавить функцию уведомления в бд
+                        }
+
+                        string login = credentils.Login;
+                        string password = _encryptionUtils.Decrypt(credentils.EncriptPassword, user.UserId);
+
+                        List<UserSettings> userSettings = _context.UserSettings.Where(x => x.UserId == user.UserId).ToList();
+
+                        foreach (var userSetting in userSettings)
+                        {
+                            if (userSetting.ActualPrice == 0) continue;
+
+                            int? minPrice = await _analystService.ParseMinPriceAsync(userSetting.ProductName);
+                            if (!minPrice.HasValue) continue;
+
+                            if (minPrice > userSetting.ActualPrice) continue;
+                            if (userSetting.MinPrice != 0 && minPrice <= userSetting.MinPrice) continue;
+                            if (((100 - user.MaxPersent) * userSetting.MinPrice / 100) >= minPrice) continue; // TODO Доработать
+
+                            int mewPrice = minPrice.Value - 5;
+
+
+                            var productPoints = await _context.ProductPoints
+                                                                .Where(p => p.MerchantProductCode == userSetting.MerchantProductCode)
+                                                                .ToListAsync();
+
+                            if (!productPoints.Any()) continue;
+
+                            foreach (var point in productPoints)
+                                point.Price = mewPrice;
+
+                            await _context.SaveChangesAsync(); ///
+
+                            var pointByCity = productPoints
+                                .GroupBy(p => p.CityCode)
+                                .Select(g => new
+                                {
+                                    city = new
+                                    {
+                                        name = g.First().CityName,
+                                        nameRu = g.First().CityNameRu,
+                                        code = g.Key
+                                    },
+                                    price = mewPrice,
+                                    points = g.Select(p => new
+                                    {
+                                        code = p.PointCode,
+                                        name = p.PointName,
+                                        amount = p.Amount
+                                    }).ToList()
+                                }).ToList();
+
+                            var payload = new
+                            {
+                                loanPeriod = 24,
+                                merchantProductCode = userSetting.MerchantProductCode,
+                                pointByCity = pointByCity
+                            };
+
+
+
+
+
+
+                            string? token = await _halykService.LoginAsync(login, password);
+
+                            if (string.IsNullOrEmpty(token)) continue;
+
+                            var request = new HttpRequestMessage(HttpMethod.Put, "https://halykmarket.kz/gw/merchant/product/remaining")
+                            {
+                                Content = new StringContent(JsonConvert.SerializeObject(payload), Encoding.UTF8, "application/json")
+                            };
+                            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+                            var response = await _httpClient.SendAsync(request);
+
+                            if (!response.IsSuccessStatusCode)
+                            {
+                                var body = await response.Content.ReadAsStringAsync();
+                                _logger.LogWarning($"Ошибка PUT-запроса: статус {response.StatusCode}, ответ: {body}");
+                            }
+                            else
+                            {
+                                _logger.LogInformation($"Успешно обновлена цена для {userSetting.MerchantProductCode} → {mewPrice} ₸");
+                            }
+                            await _context.SaveChangesAsync();
+                        }
+
+
                     }
-
-                    string login = credentils.Login;
-                    string password = _encryptionUtils.Decrypt(credentils.EncriptPassword, user.UserId);
-
-                    List<UserSettings> userSettings = _context.UserSettings.Where(x => x.UserId == user.UserId).ToList();
-
-                    foreach (var userSetting in userSettings)
-                    {
-                        if (userSetting.ActualPrice == 0) continue;
-                        string simpleName = AnalystUtils.SimplifyUser(userSetting.ProductName);
-
-                        int? minPrice = await _analystService.ParseMinPriceAsync(simpleName);
-                        if (!minPrice.HasValue) continue;
-
-                        if (minPrice > userSetting.ActualPrice) continue;
-                        if (userSetting.MinPrice != 0 && minPrice <= userSetting.MinPrice) continue;
-                        if ((user.MaxPersent * userSetting.MinPrice / 100) >= minPrice) continue;
-
-                        var productPoints = _context.ProductPoints.Where(p => p.MerchantProductCode == userSetting.MerchantProductCode).First();
-                        if (productPoints == null) continue;
-
-                        productPoints.Price = Convert.ToDouble(minPrice); 
-
-
-                        var payload = new
-                        {
-                            loanPeriod = 24,
-                            merchantProductCode = userSetting.MerchantProductCode,
-                            pointByCity = productPoints
-                        };
-                        string? token = await _analystService.LoginAsync(login, password);
-
-                        if (string.IsNullOrEmpty(token))
-                        {
-                            _logger.LogWarning($"Ошибка логина для {u}");
-                            return;
-                        }
-
-                        var request = new HttpRequestMessage(HttpMethod.Put, url)
-                        {
-                            Content = new StringContent(JsonConvert.SerializeObject(payload), Encoding.UTF8, "application/json")
-                        };
-                        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
-
-                        var response = await client.SendAsync(request);
-
-                        if (!response.IsSuccessStatusCode)
-                        {
-                            var body = await response.Content.ReadAsStringAsync();
-                            _logger.LogWarning($"Ошибка PUT-запроса: статус {response.StatusCode}, ответ: {body}");
-                        }
-                        else
-                        {
-                            _logger.LogInformation($"Успешно обновлена цена для {merchantCode} → {newPrice} ₸");
-                        }
-                        await _dbContext.SaveChangesAsync();
-
-
-
-
-
-                    }
-
-
+                }
+                catch(Exception ex)
+                {
+                    _logger.LogError("ERROR");
                 }
 
                 await Task.Delay(1000, stoppingToken);
