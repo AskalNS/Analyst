@@ -97,5 +97,44 @@ namespace Analyst.Utils
 
             return null;
         }
+
+
+        public async Task SendNotificationAsync(Guid userId, string productName, double oldPrice, int newPrice, string productUrl)
+        {
+            try
+            {
+                string _telegramBotToken = "7980379241:AAFnd_6NuI3PAlUPomo-4T42vyfZe_i7vuI";
+
+                var chatStringId = _dbContext.AdditionalUserInfo
+                    .Where(u => u.UserId == userId)
+                    .Select(u => u.TelegramId)
+                    .FirstOrDefault();
+
+                if (string.IsNullOrEmpty(chatStringId)) return;
+
+                long chatId = Convert.ToInt64(chatStringId);
+
+
+                var message = $"Цена на *{productName}*: {oldPrice} ₸ → {newPrice} ₸\n[Ссылка]({productUrl})";
+
+                var payload = new
+                {
+                    chat_id = chatId,
+                    text = message,
+                    parse_mode = "Markdown",
+                    disable_web_page_preview = true
+                };
+
+                var content = new StringContent(JsonConvert.SerializeObject(payload), Encoding.UTF8, "application/json");
+
+                var response = await _httpClient.PostAsync($"https://api.telegram.org/bot{_telegramBotToken}/sendMessage", content);
+
+                response.EnsureSuccessStatusCode();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Ошибка отправки Telegram уведомления: {ex.Message}");
+            }
+        }
     }
 }

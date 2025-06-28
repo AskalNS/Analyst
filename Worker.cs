@@ -70,9 +70,20 @@ namespace Analyst
                             int? minPrice = await _analystService.ParseMinPriceAsync(userSetting.ProductName);
                             if (!minPrice.HasValue) continue;
 
+
                             if (minPrice > userSetting.ActualPrice) continue;
-                            if (userSetting.MinPrice != 0 && minPrice <= userSetting.MinPrice) continue;
-                            if (((100 - user.MaxPersent) * userSetting.MinPrice / 100) >= minPrice) continue; // TODO Доработать
+                            if (userSetting.MinPrice != 0)
+                            {
+                                if (userSetting.MinPrice > minPrice)
+                                {
+                                    continue;
+                                }
+                            }
+                            else
+                            {
+                                if (((100 - user.MaxPersent) * userSetting.ActualPrice / 100) > minPrice) continue; // TODO Доработать
+                            }
+
 
                             int mewPrice = minPrice.Value - 5;
 
@@ -116,9 +127,6 @@ namespace Analyst
 
 
 
-
-
-
                             string? token = await _halykService.LoginAsync(login, password);
 
                             if (string.IsNullOrEmpty(token)) continue;
@@ -138,6 +146,8 @@ namespace Analyst
                             }
                             else
                             {
+                                _analystService.SendNotificationAsync(user.UserId, userSetting.ProductName, userSetting.ActualPrice, mewPrice, userSetting.ImageUrl);
+                                userSetting.ActualPrice = mewPrice;
                                 _logger.LogInformation($"Успешно обновлена цена для {userSetting.MerchantProductCode} → {mewPrice} ₸");
                             }
                             await _context.SaveChangesAsync();
@@ -148,7 +158,7 @@ namespace Analyst
                 }
                 catch(Exception ex)
                 {
-                    _logger.LogError("ERROR");
+                    _logger.LogError("ERROR:" + ex.Message);
                 }
 
                 await Task.Delay(1000, stoppingToken);
